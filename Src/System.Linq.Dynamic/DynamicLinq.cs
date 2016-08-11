@@ -1,8 +1,9 @@
-﻿using System.Collections.Generic;
-using System.Text;
+using System.Collections;
+using System.Collections.Generic;
 using System.Linq.Expressions;
 using System.Reflection;
 using System.Reflection.Emit;
+using System.Text;
 using System.Threading;
 
 namespace System.Linq.Dynamic
@@ -13,6 +14,8 @@ namespace System.Linq.Dynamic
     /// </summary>
     public static class DynamicQueryable
     {
+        #region IQueryable Extensions
+
         public static IQueryable<T> Where<T>(this IQueryable<T> source, string predicate, params object[] values)
         {
             return (IQueryable<T>)Where((IQueryable)source, predicate, values);
@@ -121,6 +124,140 @@ namespace System.Linq.Dynamic
                     typeof(Queryable), "Count",
                     new Type[] { source.ElementType }, source.Expression));
         }
+
+        public static IQueryable Distinct(this IQueryable source)
+        {
+            if (source == null) throw new ArgumentNullException("source");
+            return source.Provider.CreateQuery(
+                Expression.Call(
+                    typeof(Queryable), "Distinct",
+                    new Type[] { source.ElementType },
+                    source.Expression));
+        }
+
+        /// <summary>
+        /// Dynamically runs an aggregate function on the IQueryable.
+        /// </summary>
+        /// <param name="source">The IQueryable data source.</param>
+        /// <param name="function">The name of the function to run. Can be Sum, Average, Min, Max.</param>
+        /// <param name="member">The name of the property to aggregate over.</param>
+        /// <returns>The value of the aggregate function run over the specified property.</returns>
+        public static object Aggregate(this IQueryable source, string function, string member)
+        {
+            if (source == null) throw new ArgumentNullException("source");
+            if (member == null) throw new ArgumentNullException("member");
+
+            // Properties
+            PropertyInfo property = source.ElementType.GetProperty(member);
+            ParameterExpression parameter = Expression.Parameter(source.ElementType, "s");
+            Expression selector = Expression.Lambda(Expression.MakeMemberAccess(parameter, property), parameter);
+            // We've tried to find an expression of the type Expression<Func<TSource, TAcc>>,
+            // which is expressed as ( (TSource s) => s.Price );
+
+            var methods = typeof(Queryable).GetMethods().Where(x => x.Name == function);
+
+            // Method
+            MethodInfo aggregateMethod = typeof(Queryable).GetMethods().SingleOrDefault(
+                m => m.Name == function
+                    && m.ReturnType == property.PropertyType // should match the type of the property
+                    && m.IsGenericMethod);
+
+            // Sum, Average
+            if (aggregateMethod != null)
+            {
+                return source.Provider.Execute(
+                    Expression.Call(
+                        null,
+                        aggregateMethod.MakeGenericMethod(new[] { source.ElementType }),
+                        new[] { source.Expression, Expression.Quote(selector) }));
+            }
+            // Min, Max
+            else
+            {
+                aggregateMethod = typeof(Queryable).GetMethods().SingleOrDefault(
+                    m => m.Name == function
+                        && m.GetGenericArguments().Length == 2
+                        && m.IsGenericMethod);
+
+                return source.Provider.Execute(
+                    Expression.Call(
+                        null,
+                        aggregateMethod.MakeGenericMethod(new[] { source.ElementType, property.PropertyType }),
+                        new[] { source.Expression, Expression.Quote(selector) }));
+            }
+        }
+        #endregion
+
+        #region IEnumerable Extensions
+
+        public static IEnumerable<T> Where<T>(this IEnumerable<T> source, string predicate, params object[] values)
+        {
+            if (source == null) throw new ArgumentNullException("source");
+            return source.AsQueryable().Where(predicate, values);
+        }
+
+        public static IEnumerable Where(this IEnumerable source, string predicate, params object[] values)
+        {
+            if (source == null) throw new ArgumentNullException("source");
+            return source.AsQueryable().Where(predicate, values);
+        }
+
+        public static IEnumerable Select(this IEnumerable source, string selector, params object[] values)
+        {
+            if (source == null) throw new ArgumentNullException("source");
+            return source.AsQueryable().Select(selector, values);
+        }
+
+        public static IEnumerable<T> OrderBy<T>(this IEnumerable<T> source, string ordering, params object[] values)
+        {
+            if (source == null) throw new ArgumentNullException("source");
+            return source.AsQueryable().OrderBy(ordering, values);
+        }
+
+        public static IEnumerable OrderBy(this IEnumerable source, string ordering, params object[] values)
+        {
+            if (source == null) throw new ArgumentNullException("source");
+            return source.AsQueryable().OrderBy(ordering, values);
+        }
+
+        public static IEnumerable Take(this IEnumerable source, int count)
+        {
+            if (source == null) throw new ArgumentNullException("source");
+            return source.AsQueryable().Take(count);
+        }
+
+        public static IEnumerable Skip(this IEnumerable source, int count)
+        {
+            if (source == null) throw new ArgumentNullException("source");
+            return source.AsQueryable().Skip(count);
+        }
+
+        public static IEnumerable GroupBy(this IEnumerable source, string keySelector, string elementSelector, params object[] values)
+        {
+            if (source == null) throw new ArgumentNullException("source");
+            return source.AsQueryable().GroupBy(keySelector, elementSelector, values);
+        }
+
+        public static bool Any(this IEnumerable source)
+        {
+            if (source == null) throw new ArgumentNullException("source");
+            return source.AsQueryable().Any();
+        }
+
+        public static int Count(this IEnumerable source)
+        {
+            if (source == null) throw new ArgumentNullException("source");
+            return source.AsQueryable().Count();
+        }
+
+        public static IEnumerable Distinct(this IEnumerable source)
+        {
+            if (source == null) throw new ArgumentNullException("source");
+            return source.AsQueryable().Distinct();
+        }
+
+
+        #endregion
     }
 
     public abstract class DynamicClass
@@ -513,9 +650,11 @@ namespace System.Linq.Dynamic
             void F(string x, string y);
             void F(char x, char y);
             void F(DateTime x, DateTime y);
+            void F(DateTimeOffset x, DateTimeOffset y);
             void F(TimeSpan x, TimeSpan y);
             void F(char? x, char? y);
             void F(DateTime? x, DateTime? y);
+            void F(DateTimeOffset? x, DateTimeOffset? y);
             void F(TimeSpan? x, TimeSpan? y);
         }
 
@@ -563,6 +702,7 @@ namespace System.Linq.Dynamic
 
         interface IEnumerableSignatures
         {
+            bool Contains(object selector);
             void Where(bool predicate);
             void Any();
             void Any(bool predicate);
@@ -610,10 +750,12 @@ namespace System.Linq.Dynamic
             typeof(Double),
             typeof(Decimal),
             typeof(DateTime),
+            typeof(DateTimeOffset),
             typeof(TimeSpan),
             typeof(Guid),
             typeof(Math),
-            typeof(Convert)
+            typeof(Convert),
+			typeof(System.Data.Objects.EntityFunctions)
         };
 
         static readonly Expression trueLiteral = Expression.Constant(true);
@@ -623,6 +765,7 @@ namespace System.Linq.Dynamic
         static readonly string keywordIt = "it";
         static readonly string keywordIif = "iif";
         static readonly string keywordNew = "new";
+        static readonly string keywordOuterIt = "outerIt";
 
         static Dictionary<string, object> keywords;
 
@@ -630,6 +773,8 @@ namespace System.Linq.Dynamic
         IDictionary<string, object> externals;
         Dictionary<Expression, string> literals;
         ParameterExpression it;
+        ParameterExpression outerIt;
+
         string text;
         int textPos;
         int textLen;
@@ -800,7 +945,20 @@ namespace System.Linq.Dynamic
                 }
                 else if (IsEnumType(left.Type) || IsEnumType(right.Type))
                 {
-                    if (left.Type != right.Type)
+                    if (left.Type == right.Type)
+                    {
+                        // Convert both enums to integer
+                        Expression e;
+                        if ((e = PromoteExpression(right, typeof(Int32), true)) != null)
+                        {
+                            right = e;
+                        }
+                        if ((e = PromoteExpression(left, typeof(Int32), true)) != null)
+                        {
+                            left = e;
+                        }
+                    }
+                    else
                     {
                         Expression e;
                         if ((e = PromoteExpression(right, left.Type, true)) != null)
@@ -1076,6 +1234,7 @@ namespace System.Linq.Dynamic
             {
                 if (value is Type) return ParseTypeAccess((Type)value);
                 if (value == (object)keywordIt) return ParseIt();
+                if (value == (object)keywordOuterIt) return ParseOuterIt();
                 if (value == (object)keywordIif) return ParseIif();
                 if (value == (object)keywordNew) return ParseNew();
                 NextToken();
@@ -1107,6 +1266,14 @@ namespace System.Linq.Dynamic
                 throw ParseError(Res.NoItInScope);
             NextToken();
             return it;
+        }
+
+        Expression ParseOuterIt()
+        {
+            if (outerIt == null)
+                throw ParseError(Res.NoItInScope);
+            NextToken();
+            return outerIt;
         }
 
         Expression ParseIif()
@@ -1317,7 +1484,7 @@ namespace System.Linq.Dynamic
 
         Expression ParseAggregate(Expression instance, Type elementType, string methodName, int errorPos)
         {
-            ParameterExpression outerIt = it;
+            outerIt = it;
             ParameterExpression innerIt = Expression.Parameter(elementType, "");
             it = innerIt;
             Expression[] args = ParseArgumentList();
@@ -1338,10 +1505,16 @@ namespace System.Linq.Dynamic
             {
                 args = new Expression[] { instance };
             }
+            
+
             else
             {
-                args = new Expression[] { instance, Expression.Lambda(args[0], innerIt) };
+                if (signature.Name == "Contains")
+                    args = new Expression[] { instance, args[0] };
+                else
+                    args = new Expression[] { instance, Expression.Lambda(args[0], innerIt) };
             }
+
             return Expression.Call(typeof(Enumerable), signature.Name, typeArgs, args);
         }
 
@@ -1740,6 +1913,18 @@ namespace System.Linq.Dynamic
             if (st != source && tt == target) return false;
             TypeCode sc = st.IsEnum ? TypeCode.Object : Type.GetTypeCode(st);
             TypeCode tc = tt.IsEnum ? TypeCode.Object : Type.GetTypeCode(tt);
+
+            if (st.IsEnum & !tt.IsEnum) // If the source is an enum and the target is numeric 
+            {
+                switch (tc)
+                {
+                    case TypeCode.Int16:
+                    case TypeCode.Int32:
+                    case TypeCode.Int64:
+                        return true;
+                }
+            }
+
             switch (sc)
             {
                 case TypeCode.SByte:
@@ -2235,6 +2420,7 @@ namespace System.Linq.Dynamic
             d.Add("false", falseLiteral);
             d.Add("null", nullLiteral);
             d.Add(keywordIt, keywordIt);
+            d.Add(keywordOuterIt, keywordOuterIt);
             d.Add(keywordIif, keywordIif);
             d.Add(keywordNew, keywordNew);
             foreach (Type type in predefinedTypes) d.Add(type.Name, type);
@@ -2290,4 +2476,3 @@ namespace System.Linq.Dynamic
         public const string IdentifierExpected = "Identifier expected";
     }
 }
-
